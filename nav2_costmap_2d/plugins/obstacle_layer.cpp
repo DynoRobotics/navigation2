@@ -78,7 +78,6 @@ void ObstacleLayer::onInitialize()
 
   declareParameter("enabled", rclcpp::ParameterValue(true));
   declareParameter("footprint_clearing_enabled", rclcpp::ParameterValue(true));
-  declareParameter("min_obstacle_height", rclcpp::ParameterValue(0.0));
   declareParameter("max_obstacle_height", rclcpp::ParameterValue(2.0));
   declareParameter("combination_method", rclcpp::ParameterValue(1));
   declareParameter("observation_sources", rclcpp::ParameterValue(std::string("")));
@@ -90,7 +89,6 @@ void ObstacleLayer::onInitialize()
 
   node->get_parameter(name_ + "." + "enabled", enabled_);
   node->get_parameter(name_ + "." + "footprint_clearing_enabled", footprint_clearing_enabled_);
-  node->get_parameter(name_ + "." + "min_obstacle_height", min_obstacle_height_);
   node->get_parameter(name_ + "." + "max_obstacle_height", max_obstacle_height_);
   node->get_parameter(name_ + "." + "combination_method", combination_method_);
   node->get_parameter("track_unknown_space", track_unknown_space);
@@ -225,7 +223,6 @@ void ObstacleLayer::onInitialize()
     if (data_type == "LaserScan") {
       auto sub = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::LaserScan,
           rclcpp_lifecycle::LifecycleNode>>(node, topic, custom_qos_profile, sub_opt);
-      sub->unsubscribe();
 
       auto filter = std::make_shared<tf2_ros::MessageFilter<sensor_msgs::msg::LaserScan>>(
         *sub, *tf_, global_frame_, 50,
@@ -254,7 +251,6 @@ void ObstacleLayer::onInitialize()
     } else {
       auto sub = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::PointCloud2,
           rclcpp_lifecycle::LifecycleNode>>(node, topic, custom_qos_profile, sub_opt);
-      sub->unsubscribe();
 
       if (inf_is_valid) {
         RCLCPP_WARN(
@@ -298,9 +294,7 @@ ObstacleLayer::dynamicParametersCallback(
     const auto & param_name = parameter.get_name();
 
     if (param_type == ParameterType::PARAMETER_DOUBLE) {
-      if (param_name == name_ + "." + "min_obstacle_height") {
-        min_obstacle_height_ = parameter.as_double();
-      } else if (param_name == name_ + "." + "max_obstacle_height") {
+      if (param_name == name_ + "." + "max_obstacle_height") {
         max_obstacle_height_ = parameter.as_double();
       }
     } else if (param_type == ParameterType::PARAMETER_BOOL) {
@@ -325,6 +319,8 @@ ObstacleLayer::laserScanCallback(
   sensor_msgs::msg::LaserScan::ConstSharedPtr message,
   const std::shared_ptr<nav2_costmap_2d::ObservationBuffer> & buffer)
 {
+  if (!active_) {return;}
+
   // project the laser into a point cloud
   sensor_msgs::msg::PointCloud2 cloud;
   cloud.header = message->header;
@@ -359,6 +355,8 @@ ObstacleLayer::laserScanValidInfCallback(
   sensor_msgs::msg::LaserScan::ConstSharedPtr raw_message,
   const std::shared_ptr<nav2_costmap_2d::ObservationBuffer> & buffer)
 {
+  if (!active_) {return;}
+
   // Filter positive infinities ("Inf"s) to max_range.
   float epsilon = 0.0001;  // a tenth of a millimeter
   sensor_msgs::msg::LaserScan message = *raw_message;
@@ -402,6 +400,8 @@ ObstacleLayer::pointCloud2Callback(
   sensor_msgs::msg::PointCloud2::ConstSharedPtr message,
   const std::shared_ptr<ObservationBuffer> & buffer)
 {
+  if (!active_) {return;}
+
   // buffer the point cloud
   buffer->lock();
   buffer->bufferCloud(*message);
@@ -456,12 +456,6 @@ ObstacleLayer::updateBounds(
 
     for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
       double px = *iter_x, py = *iter_y, pz = *iter_z;
-
-      // if the obstacle is too low, we won't add it
-      if (pz < min_obstacle_height_) {
-        RCLCPP_DEBUG(logger_, "The point is too low");
-        continue;
-      }
 
       // if the obstacle is too high or too far away from the robot we won't add it
       if (pz > max_obstacle_height_) {
@@ -707,23 +701,14 @@ ObstacleLayer::activate()
     notifier->clear();
   }
 
-  // if we're stopped we need to re-subscribe to topics
-  for (unsigned int i = 0; i < observation_subscribers_.size(); ++i) {
-    if (observation_subscribers_[i] != NULL) {
-      observation_subscribers_[i]->subscribe();
-    }
-  }
   resetBuffersLastUpdated();
+  active_ = true;
 }
 
 void
 ObstacleLayer::deactivate()
 {
-  for (unsigned int i = 0; i < observation_subscribers_.size(); ++i) {
-    if (observation_subscribers_[i] != NULL) {
-      observation_subscribers_[i]->unsubscribe();
-    }
-  }
+  active_ = false;
 }
 
 void

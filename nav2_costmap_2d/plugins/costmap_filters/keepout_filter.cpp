@@ -135,7 +135,7 @@ void KeepoutFilter::maskCallback(
       logger_,
       "KeepoutFilter: Received filter mask from %s topic.", mask_topic_.c_str());
   } else {
-    RCLCPP_WARN(
+    RCLCPP_DEBUG(
       logger_,
       "KeepoutFilter: New filter mask arrived from %s topic. Updating old filter mask.",
       mask_topic_.c_str());

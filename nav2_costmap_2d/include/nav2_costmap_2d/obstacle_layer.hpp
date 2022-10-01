@@ -226,7 +226,6 @@ protected:
     double * max_y);
 
   std::string global_frame_;  ///< @brief The global frame for the costmap
-  double min_obstacle_height_;  ///< @brief Max Obstacle Height
   double max_obstacle_height_;  ///< @brief Max Obstacle Height
 
   /// @brief Used to project laser scans into point clouds
@@ -253,6 +252,7 @@ protected:
   bool rolling_window_;
   bool was_reset_;
   int combination_method_;
+  bool active_{false};
 };
 
 }  // namespace nav2_costmap_2d
