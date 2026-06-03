@@ -250,7 +250,8 @@ MotionPoses HybridMotionTable::getProjections(const NodeHybrid * node)
 
 unsigned int HybridMotionTable::getClosestAngularBin(const double & theta)
 {
-  return static_cast<unsigned int>(floor(theta / bin_size));
+  auto bin = static_cast<unsigned int>(round(static_cast<float>(theta) / bin_size));
+  return bin < num_angle_quantization ? bin : 0u;
 }
 
 float HybridMotionTable::getAngleFromBin(const unsigned int & bin_idx)
@@ -381,9 +382,9 @@ inline float distanceHeuristic2D(
   const unsigned int idx, const unsigned int size_x,
   const unsigned int target_x, const unsigned int target_y)
 {
-  return std::hypotf(
-    static_cast<int>(idx % size_x) - static_cast<int>(target_x),
-    static_cast<int>(idx / size_x) - static_cast<int>(target_y));
+  int dx = static_cast<int>(idx % size_x) - static_cast<int>(target_x);
+  int dy = static_cast<int>(idx / size_x) - static_cast<int>(target_y);
+  return std::sqrt(dx * dx + dy * dy);
 }
 
 void NodeHybrid::resetObstacleHeuristic(
@@ -705,14 +706,19 @@ bool NodeHybrid::backtracePath(CoordinateVector & path)
 
   NodePtr current_node = this;
 
-  do {
+  while (current_node->parent) {
     path.push_back(current_node->pose);
     // Convert angle to radians
     path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
     current_node = current_node->parent;
-  } while (current_node->parent);
+  }
 
-  return path.size() > 0;
+  // add the start pose
+  path.push_back(current_node->pose);
+  // Convert angle to radians
+  path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
+
+  return true;
 }
 
 }  // namespace nav2_smac_planner

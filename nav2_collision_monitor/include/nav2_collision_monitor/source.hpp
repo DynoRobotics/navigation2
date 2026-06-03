@@ -1,4 +1,4 @@
-// Copyright (c) 2022 Samsung Research Russia
+// Copyright (c) 2022 Samsung R&D Institute Russia
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,12 +40,14 @@ public:
   /**
    * @brief Source constructor
    * @param node Collision Monitor node pointer
-   * @param polygon_name Name of data source
+   * @param source_name Name of data source
    * @param tf_buffer Shared pointer to a TF buffer
    * @param base_frame_id Robot base frame ID. The output data will be transformed into this frame.
    * @param global_frame_id Global frame ID for correct transform calculation
    * @param transform_tolerance Transform tolerance
    * @param source_timeout Maximum time interval in which data is considered valid
+   * @param base_shift_correction Whether to correct source data towards to base frame movement,
+   * considering the difference between current time and latest source time
    */
   Source(
     const nav2_util::LifecycleNode::WeakPtr & node,
@@ -54,7 +56,8 @@ public:
     const std::string & base_frame_id,
     const std::string & global_frame_id,
     const tf2::Duration & transform_tolerance,
-    const rclcpp::Duration & source_timeout);
+    const rclcpp::Duration & source_timeout,
+    const bool base_shift_correction);
   /**
    * @brief Source destructor
    */
@@ -71,7 +74,19 @@ public:
     const rclcpp::Time & curr_time,
     std::vector<Point> & data) const = 0;
 
+  /**
+   * @brief Obtains source enabled state
+   * @return Whether source is enabled
+   */
+  bool getEnabled() const;
+
 protected:
+  /**
+   * @brief Source configuration routine.
+   * @return True in case of everything is configured correctly, or false otherwise
+   */
+  bool configure();
+
   /**
    * @brief Supporting routine obtaining ROS-parameters common for all data sources
    * @param source_topic Output name of source subscription topic
@@ -89,19 +104,11 @@ protected:
     const rclcpp::Time & curr_time) const;
 
   /**
-   * @brief Obtains a transform from source_frame_id at source_time ->
-   * to base_frame_id_ at curr_time time
-   * @param source_frame_id Source frame ID to convert data from
-   * @param source_time Source timestamp to convert data from
-   * @param curr_time Current node time to interpolate data to
-   * @param tf_transform Output source->base transform
-   * @return True if got correct transform, otherwise false
+   * @brief Callback executed when a parameter change is detected
+   * @param event ParameterEvent message
    */
-  bool getTransform(
-    const std::string & source_frame_id,
-    const rclcpp::Time & source_time,
-    const rclcpp::Time & curr_time,
-    tf2::Transform & tf_transform) const;
+  rcl_interfaces::msg::SetParametersResult dynamicParametersCallback(
+    std::vector<rclcpp::Parameter> parameters);
 
   // ----- Variables -----
 
@@ -109,6 +116,8 @@ protected:
   nav2_util::LifecycleNode::WeakPtr node_;
   /// @brief Collision monitor node logger stored for further usage
   rclcpp::Logger logger_{rclcpp::get_logger("collision_monitor")};
+  /// @brief Dynamic parameters handler
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
 
   // Basic parameters
   /// @brief Name of data source
@@ -125,6 +134,11 @@ protected:
   tf2::Duration transform_tolerance_;
   /// @brief Maximum time interval in which data is considered valid
   rclcpp::Duration source_timeout_;
+  /// @brief Whether to correct source data towards to base frame movement,
+  /// considering the difference between current time and latest source time
+  bool base_shift_correction_;
+  /// @brief Whether source is enabled
+  bool enabled_;
 };  // class Source
 
 }  // namespace nav2_collision_monitor

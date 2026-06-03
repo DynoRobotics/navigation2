@@ -223,7 +223,6 @@ bool NodeLattice::isNodeValid(
 
   // If valid motion primitives are set, check intermediary poses > 1 cell apart
   if (motion_primitive) {
-    const float pi_2 = 2.0 * M_PI;
     const float & grid_resolution = motion_table.lattice_metadata.grid_resolution;
     const float & resolution_diag_sq = 2.0 * grid_resolution * grid_resolution;
     MotionPose last_pose(1e9, 1e9, 1e9), pose_dist(0.0, 0.0, 0.0);
@@ -246,7 +245,7 @@ bool NodeLattice::isNodeValid(
         // If reversing, invert the angle because the robot is backing into the primitive
         // not driving forward with it
         if (is_backwards) {
-          prim_pose._theta = std::fmod(it->_theta + M_PI, pi_2);
+          prim_pose._theta = std::fmod(it->_theta + M_PI, 2.0 * M_PI);
         } else {
           prim_pose._theta = it->_theta;
         }
@@ -466,7 +465,6 @@ void NodeLattice::getNeighbors(
   NodeVector & neighbors)
 {
   unsigned int index = 0;
-  float angle;
   bool backwards = false;
   NodePtr neighbor = nullptr;
   Coordinates initial_node_coords, motion_projection;
@@ -487,6 +485,24 @@ void NodeLattice::getNeighbors(
     motion_projection.y = this->pose.y + (end_pose._y / grid_resolution);
     motion_projection.theta = motion_primitives[i]->end_angle /*this is the ending angular bin*/;
 
+    // if i >= idx, then we're in a reversing primitive. In that situation,
+    // the orientation of the robot is mirrored from what it would otherwise
+    // appear to be from the motion primitives file. We want to take this into
+    // account in case the robot base footprint is asymmetric.
+    backwards = false;
+    if (i >= direction_change_idx) {
+      backwards = true;
+      float opposite_heading_theta =
+        motion_projection.theta - (motion_table.num_angle_quantization / 2);
+      if (opposite_heading_theta < 0) {
+        opposite_heading_theta += motion_table.num_angle_quantization;
+      }
+      if (opposite_heading_theta > motion_table.num_angle_quantization) {
+        opposite_heading_theta -= motion_table.num_angle_quantization;
+      }
+      motion_projection.theta = opposite_heading_theta;
+    }
+
     index = NodeLattice::getIndex(
       static_cast<unsigned int>(motion_projection.x),
       static_cast<unsigned int>(motion_projection.y),
@@ -496,28 +512,11 @@ void NodeLattice::getNeighbors(
       // Cache the initial pose in case it was visited but valid
       // don't want to disrupt continuous coordinate expansion
       initial_node_coords = neighbor->pose;
-      // if i >= idx, then we're in a reversing primitive. In that situation,
-      // the orientation of the robot is mirrored from what it would otherwise
-      // appear to be from the motion primitives file. We want to take this into
-      // account in case the robot base footprint is asymmetric.
-      backwards = false;
-      angle = motion_projection.theta;
-      if (i >= direction_change_idx) {
-        backwards = true;
-        angle = motion_projection.theta - (motion_table.num_angle_quantization / 2);
-        if (angle < 0) {
-          angle += motion_table.num_angle_quantization;
-        }
-        if (angle > motion_table.num_angle_quantization) {
-          angle -= motion_table.num_angle_quantization;
-        }
-      }
-
       neighbor->setPose(
         Coordinates(
           motion_projection.x,
           motion_projection.y,
-          angle));
+          motion_projection.theta));
 
       // Using a special isNodeValid API here, giving the motion primitive to use to
       // validity check the transition of the current node to the new node over
@@ -541,44 +540,52 @@ bool NodeLattice::backtracePath(CoordinateVector & path)
     return false;
   }
 
-  Coordinates initial_pose, prim_pose;
   NodePtr current_node = this;
+
+  while (current_node->parent) {
+    addNodeToPath(current_node, path);
+    current_node = current_node->parent;
+  }
+
+  // add start to path
+  addNodeToPath(current_node, path);
+
+  return true;
+}
+
+void NodeLattice::addNodeToPath(
+  NodeLattice::NodePtr current_node,
+  NodeLattice::CoordinateVector & path)
+{
+  Coordinates initial_pose, prim_pose;
   MotionPrimitive * prim = nullptr;
   const float & grid_resolution = NodeLattice::motion_table.lattice_metadata.grid_resolution;
-  const float pi_2 = 2.0 * M_PI;
+  prim = current_node->getMotionPrimitive();
+  // if motion primitive is valid, then was searched (rather than analytically expanded),
+  // include dense path of subpoints making up the primitive at grid resolution
+  if (prim) {
+    initial_pose.x = current_node->pose.x - (prim->poses.back()._x / grid_resolution);
+    initial_pose.y = current_node->pose.y - (prim->poses.back()._y / grid_resolution);
+    initial_pose.theta = NodeLattice::motion_table.getAngleFromBin(prim->start_angle);
 
-  do {
-    prim = current_node->getMotionPrimitive();
-    // if motion primitive is valid, then was searched (rather than analytically expanded),
-    // include dense path of subpoints making up the primitive at grid resolution
-    if (prim) {
-      initial_pose.x = current_node->pose.x - (prim->poses.back()._x / grid_resolution);
-      initial_pose.y = current_node->pose.y - (prim->poses.back()._y / grid_resolution);
-      initial_pose.theta = NodeLattice::motion_table.getAngleFromBin(prim->start_angle);
-
-      for (auto it = prim->poses.crbegin(); it != prim->poses.crend(); ++it) {
-        // Convert primitive pose into grid space if it should be checked
-        prim_pose.x = initial_pose.x + (it->_x / grid_resolution);
-        prim_pose.y = initial_pose.y + (it->_y / grid_resolution);
-        // If reversing, invert the angle because the robot is backing into the primitive
-        // not driving forward with it
-        if (current_node->isBackward()) {
-          prim_pose.theta = std::fmod(it->_theta + M_PI, pi_2);
-        } else {
-          prim_pose.theta = it->_theta;
-        }
-        path.push_back(prim_pose);
+    for (auto it = prim->poses.crbegin(); it != prim->poses.crend(); ++it) {
+      // Convert primitive pose into grid space if it should be checked
+      prim_pose.x = initial_pose.x + (it->_x / grid_resolution);
+      prim_pose.y = initial_pose.y + (it->_y / grid_resolution);
+      // If reversing, invert the angle because the robot is backing into the primitive
+      // not driving forward with it
+      if (current_node->isBackward()) {
+        prim_pose.theta = std::fmod(it->_theta + M_PI, 2.0 * M_PI);
+      } else {
+        prim_pose.theta = it->_theta;
       }
-    } else {
-      // For analytic expansion nodes where there is no valid motion primitive
-      path.push_back(current_node->pose);
-      path.back().theta = NodeLattice::motion_table.getAngleFromBin(path.back().theta);
+      path.push_back(prim_pose);
     }
-
-    current_node = current_node->parent;
-  } while (current_node->parent);
-
-  return path.size() > 0;
+  } else {
+    // For analytic expansion nodes where there is no valid motion primitive
+    path.push_back(current_node->pose);
+    path.back().theta = NodeLattice::motion_table.getAngleFromBin(path.back().theta);
+  }
 }
 
 }  // namespace nav2_smac_planner

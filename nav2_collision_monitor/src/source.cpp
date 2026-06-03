@@ -1,4 +1,4 @@
-// Copyright (c) 2022 Samsung Research Russia
+// Copyright (c) 2022 Samsung R&D Institute Russia
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,15 +33,28 @@ Source::Source(
   const std::string & base_frame_id,
   const std::string & global_frame_id,
   const tf2::Duration & transform_tolerance,
-  const rclcpp::Duration & source_timeout)
+  const rclcpp::Duration & source_timeout,
+  const bool base_shift_correction)
 : node_(node), source_name_(source_name), tf_buffer_(tf_buffer),
   base_frame_id_(base_frame_id), global_frame_id_(global_frame_id),
-  transform_tolerance_(transform_tolerance), source_timeout_(source_timeout)
+  transform_tolerance_(transform_tolerance), source_timeout_(source_timeout),
+  base_shift_correction_(base_shift_correction)
 {
 }
 
 Source::~Source()
 {
+}
+
+bool Source::configure()
+{
+  auto node = node_.lock();
+
+  // Add callback for dynamic parameters
+  dyn_params_handler_ = node->add_on_set_parameters_callback(
+    std::bind(&Source::dynamicParametersCallback, this, std::placeholders::_1));
+
+  return true;
 }
 
 void Source::getCommonParameters(std::string & source_topic)
@@ -55,6 +68,10 @@ void Source::getCommonParameters(std::string & source_topic)
     node, source_name_ + ".topic",
     rclcpp::ParameterValue("scan"));  // Set deafult topic for laser scanner
   source_topic = node->get_parameter(source_name_ + ".topic").as_string();
+
+  nav2_util::declare_parameter_if_not_declared(
+    node, source_name_ + ".enabled", rclcpp::ParameterValue(true));
+  enabled_ = node->get_parameter(source_name_ + ".enabled").as_bool();
 }
 
 bool Source::sourceValid(
@@ -76,33 +93,29 @@ bool Source::sourceValid(
   return true;
 }
 
-bool Source::getTransform(
-  const std::string & source_frame_id,
-  const rclcpp::Time & source_time,
-  const rclcpp::Time & curr_time,
-  tf2::Transform & tf2_transform) const
+bool Source::getEnabled() const
 {
-  geometry_msgs::msg::TransformStamped transform;
-  tf2_transform.setIdentity();  // initialize by identical transform
+  return enabled_;
+}
 
-  try {
-    // Obtaining the transform to get data from source to base frame.
-    // This also considers the time shift between source and base.
-    transform = tf_buffer_->lookupTransform(
-      base_frame_id_, curr_time,
-      source_frame_id, source_time,
-      global_frame_id_, transform_tolerance_);
-  } catch (tf2::TransformException & e) {
-    RCLCPP_ERROR(
-      logger_,
-      "[%s]: Failed to get \"%s\"->\"%s\" frame transform: %s",
-      source_name_.c_str(), source_frame_id.c_str(), base_frame_id_.c_str(), e.what());
-    return false;
+rcl_interfaces::msg::SetParametersResult
+Source::dynamicParametersCallback(
+  std::vector<rclcpp::Parameter> parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+
+  for (auto parameter : parameters) {
+    const auto & param_type = parameter.get_type();
+    const auto & param_name = parameter.get_name();
+
+    if (param_type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) {
+      if (param_name == source_name_ + "." + "enabled") {
+        enabled_ = parameter.as_bool();
+      }
+    }
   }
-
-  // Convert TransformStamped to TF2 transform
-  tf2::fromMsg(transform.transform, tf2_transform);
-  return true;
+  result.successful = true;
+  return result;
 }
 
 }  // namespace nav2_collision_monitor

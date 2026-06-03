@@ -19,6 +19,7 @@
 #include <utility>
 #include <limits>
 
+#include "lifecycle_msgs/msg/state.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav_2d_utils/conversions.hpp"
 #include "nav_2d_utils/tf_help.hpp"
@@ -59,13 +60,11 @@ ControllerServer::ControllerServer(const rclcpp::NodeOptions & options)
   declare_parameter("speed_limit_topic", rclcpp::ParameterValue("speed_limit"));
 
   declare_parameter("failure_tolerance", rclcpp::ParameterValue(0.0));
+  declare_parameter("publish_zero_velocity", rclcpp::ParameterValue(true));
 
   // The costmap node is used in the implementation of the controller
   costmap_ros_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "local_costmap", std::string{get_namespace()}, "local_costmap");
-
-  // Launch a thread to run the costmap node
-  costmap_thread_ = std::make_unique<nav2_util::NodeThread>(costmap_ros_);
 }
 
 ControllerServer::~ControllerServer()
@@ -121,8 +120,11 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
   std::string speed_limit_topic;
   get_parameter("speed_limit_topic", speed_limit_topic);
   get_parameter("failure_tolerance", failure_tolerance_);
+  get_parameter("publish_zero_velocity", publish_zero_velocity_);
 
   costmap_ros_->configure();
+  // Launch a thread to run the costmap node
+  costmap_thread_ = std::make_unique<nav2_util::NodeThread>(costmap_ros_);
 
   try {
     progress_checker_type_ = nav2_util::get_plugin_type_param(node, progress_checker_id_);
@@ -246,6 +248,14 @@ ControllerServer::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
   for (it = controllers_.begin(); it != controllers_.end(); ++it) {
     it->second->deactivate();
   }
+
+  /*
+   * The costmap is also a lifecycle node, so it may have already fired on_deactivate
+   * via rcl preshutdown cb. Despite the rclcpp docs saying on_shutdown callbacks fire
+   * in the order added, the preshutdown callbacks clearly don't per se, due to using an
+   * unordered_set iteration. Once this issue is resolved, we can maybe make a stronger
+   * ordering assumption: https://github.com/ros2/rclcpp/issues/2096
+   */
   costmap_ros_->deactivate();
 
   publishZeroVelocity();
@@ -271,11 +281,14 @@ ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
   controllers_.clear();
 
   goal_checkers_.clear();
+
   costmap_ros_->cleanup();
+
 
   // Release any allocated resources
   action_server_.reset();
   odom_sub_.reset();
+  costmap_thread_.reset();
   vel_publisher_.reset();
   speed_limit_sub_.reset();
 
@@ -403,18 +416,27 @@ void ControllerServer::computeControl()
         RCLCPP_WARN(
           get_logger(), "Control loop missed its desired rate of %.4fHz",
           controller_frequency_);
+        loop_rate.reset();
       }
     }
   } catch (nav2_core::PlannerException & e) {
-    RCLCPP_ERROR(this->get_logger(), e.what());
+    RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     publishZeroVelocity();
     action_server_->terminate_current();
+    return;
+  } catch (std::exception & e) {
+    RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+    publishZeroVelocity();
+    std::shared_ptr<Action::Result> result = std::make_shared<Action::Result>();
+    action_server_->terminate_current(result);
     return;
   }
 
   RCLCPP_DEBUG(get_logger(), "Controller succeeded, setting result");
 
-  publishZeroVelocity();
+  if (publish_zero_velocity_) {
+    publishZeroVelocity();
+  }
 
   // TODO(orduno) #861 Handle a pending preemption and set controller name
   action_server_->succeeded_current();
@@ -466,7 +488,7 @@ void ControllerServer::computeAndPublishVelocity()
     last_valid_cmd_time_ = now();
   } catch (nav2_core::PlannerException & e) {
     if (failure_tolerance_ > 0 || failure_tolerance_ == -1.0) {
-      RCLCPP_WARN(this->get_logger(), e.what());
+      RCLCPP_WARN(this->get_logger(), "%s", e.what());
       cmd_vel_2d.twist.angular.x = 0;
       cmd_vel_2d.twist.angular.y = 0;
       cmd_vel_2d.twist.angular.z = 0;
@@ -525,6 +547,16 @@ void ControllerServer::updateGlobalPath()
       RCLCPP_INFO(
         get_logger(), "Terminating action, invalid controller %s requested.",
         goal->controller_id.c_str());
+      action_server_->terminate_current();
+      return;
+    }
+    std::string current_goal_checker;
+    if (findGoalCheckerId(goal->goal_checker_id, current_goal_checker)) {
+      current_goal_checker_ = current_goal_checker;
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "Terminating action, invalid goal checker %s requested.",
+        goal->goal_checker_id.c_str());
       action_server_->terminate_current();
       return;
     }

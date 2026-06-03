@@ -36,6 +36,7 @@ AStarAlgorithm<NodeT>::AStarAlgorithm(
   const MotionModel & motion_model,
   const SearchInfo & search_info)
 : _traverse_unknown(true),
+  _is_initialized(false),
   _max_iterations(0),
   _max_planning_time(0),
   _x_size(0),
@@ -67,7 +68,10 @@ void AStarAlgorithm<NodeT>::initialize(
   _max_iterations = max_iterations;
   _max_on_approach_iterations = max_on_approach_iterations;
   _max_planning_time = max_planning_time;
-  NodeT::precomputeDistanceHeuristic(lookup_table_size, _motion_model, dim_3_size, _search_info);
+  if (!_is_initialized) {
+    NodeT::precomputeDistanceHeuristic(lookup_table_size, _motion_model, dim_3_size, _search_info);
+  }
+  _is_initialized = true;
   _dim3_size = dim_3_size;
   _expander = std::make_unique<AnalyticExpansion<NodeT>>(
     _motion_model, _search_info, _traverse_unknown, _dim3_size);
@@ -117,8 +121,11 @@ template<typename NodeT>
 typename AStarAlgorithm<NodeT>::NodePtr AStarAlgorithm<NodeT>::addToGraph(
   const unsigned int & index)
 {
-  // Emplace will only create a new object if it doesn't already exist.
-  // If an element exists, it will return the existing object, not create a new one.
+  auto iter = _graph.find(index);
+  if (iter != _graph.end()) {
+    return &(iter->second);
+  }
+
   return &(_graph.emplace(index, NodeT(index)).first->second);
 }
 
@@ -321,6 +328,11 @@ bool AStarAlgorithm<NodeT>::createPath(
         addNode(g_cost + getHeuristicCost(neighbor), neighbor);
       }
     }
+  }
+
+  if (_best_heuristic_node.first < getToleranceHeuristic()) {
+    // If we run out of serach options, return the path that is closest, if within tolerance.
+    return _graph.at(_best_heuristic_node.second).backtracePath(path);
   }
 
   return false;
